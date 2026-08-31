@@ -13,6 +13,8 @@ Minimal voice dictation for pi. No floating bubbles, no menu bar app, no notific
 - **Backend:** Deepgram Nova-3 streaming
 - **What's "real-time":** audio is transcribed *while you talk*; the finalized text is inserted in one shot when you stop. Stop-to-display latency is typically ~300-500ms.
 
+[![dictate demo](assets/dictate.png)](https://www.youtube.com/watch?v=gYxZt9Qe0fk)
+
 ## Install
 
 ```bash
@@ -91,3 +93,7 @@ See https://pi.dev/docs/latest/tmux for the full pi-on-tmux keyboard guide.
 - **`alt+m` inserts `µ` instead of toggling** (macOS) — your terminal isn't treating Option as Alt. In iTerm2: Profile → Keys → Left/Right Option key → `Esc+`. (Ghostty/Kitty/WezTerm do this by default.)
 - **Shortcuts don't work inside tmux** — if you rebound to `ctrl+shift+m`/`ctrl+shift+n`, those collapse to Enter / `Ctrl+N` unless tmux forwards modified keys; see the tmux section above. The default `alt+m`/`alt+n` bindings do not have this problem.
 - **Need lifecycle logs?** Run pi with `DICTATE_DEBUG=1` — the extension appends timestamped events (key hits, toggles, WebSocket open/error/close with their session generation) to `/tmp/dictate-debug.log`.
+
+## Notes
+
+This is a personal tool I built for my own workflow. I publish it in case it's useful to others. It's MIT-licensed, so fork it freely. Issues and PRs are welcome, but I only maintain what I personally use. So I won't merge anything I don't run myself.
