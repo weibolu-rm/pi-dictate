@@ -10,6 +10,7 @@ Minimal voice dictation for pi. No floating bubbles, no menu bar app, no notific
   - Nothing text-capable focused → transcript is copied to the clipboard (via `pbcopy`, so macOS-only) and a notification says so. A finished dictation is never lost.
 - **Start guard:** if no input field is focused when you press `alt+m`, dictation doesn't start and a notification explains why.
 - **Live feedback:** while recording, the status row shows a red `●` plus a real-time mic-level meter (`● ▂▅▇ listening…`) — instant confirmation your mic is live. On stop it flips to a `finalizing…` spinner.
+- **Language:** English by default. Switch with `/dictate-language <code>` — e.g. `/dictate-language ja`, `/dictate-language pt-BR`, or `multi` for multilingual code-switching. The command autocompletes all [nova-3 supported languages](https://developers.deepgram.com/docs/models-languages-overview#nova-3) by code or name (typing `jap` suggests `ja` · Japanese). While recording in a non-default language, the status row shows it: `● ▂▅▇ listening [ja]…`. `/dictate-language` with no args shows the current language.
 - **Backend:** Deepgram Nova-3 streaming
 - **What's "real-time":** audio is transcribed *while you talk*; the finalized text is inserted in one shot when you stop. Stop-to-display latency is typically ~300-500ms.
 
@@ -57,7 +58,8 @@ Run `/reload` in pi after first install (or after editing `index.ts`) to pick up
 All knobs are at the top of `index.ts`:
 
 - **Hotkey:** change the `Key.alt("m")` / `Key.alt("n")` references near the bottom (the input listener `onGlobalInput` and the fallback `pi.registerShortcut` calls).
-- **Model:** edit `DG_URL` — swap `model=nova-3` for `nova-2`, `enhanced`, etc.
+- **Model:** edit `deepgramUrl()` — swap `model=nova-3` for `nova-2`, `enhanced`, etc.
+- **Default language:** edit `DEFAULT_LANGUAGE` (or just run `/dictate-language` — the list of codes lives in `NOVA3_LANGUAGE_GROUPS`).
 - **Endpointing (how long a silence ends an utterance):** `endpointing=300` in the URL. Lower = faster finals, more fragmentation. Higher = slower finals, more coherent chunks.
 - **Smart formatting / punctuation:** toggle `smart_format` and `punctuate` in the URL.
 - **Level meter:** `METER_CELLS` (width in bars), `METER_TICK_MS` (update rate), `METER_FLOOR_DB` / `METER_CEILING_DB` (loudness range mapped to empty/full bars).
@@ -96,4 +98,4 @@ See https://pi.dev/docs/latest/tmux for the full pi-on-tmux keyboard guide.
 
 ## Notes
 
-This is a personal tool I built for my own workflow. I publish it in case it's useful to others. It's MIT-licensed, so fork it freely. Issues and PRs are welcome, but I only maintain what I personally use. So I won't merge anything I don't run myself.
+This is  a fork of [amosblomqvist/pi-dictate](https://github.com/amosblomqvist/pi-dictate). I simply added language selection support for multilingual use. All credits to Amos, thank you for many free MIT pi tools!

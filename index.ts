@@ -3,6 +3,7 @@
  *
  * Press alt+m to start, press it again to stop.
  * Press alt+n to cancel and discard the in-flight transcript.
+ * Run /dictate-language <code> to switch transcription language (default: en).
  *
  * Focus-aware: alt+m/alt+n are intercepted at the TUI input layer (before any
  * focused component), so dictation works inside ANY dialog — quiz popups,
@@ -48,17 +49,98 @@ const dbg = (msg: string) => {
   } catch {}
 };
 
+// Languages supported by nova-3, per Deepgram's models & languages overview:
+// https://developers.deepgram.com/docs/models-languages-overview#nova-3
+// Grouped as { language name → accepted codes }; the base code is first in
+// each group.
+const NOVA3_LANGUAGE_GROUPS: ReadonlyArray<{ name: string; codes: readonly string[] }> = [
+  { name: "Multilingual (code-switching)", codes: ["multi"] },
+  { name: "Afrikaans", codes: ["af", "af-ZA"] },
+  { name: "Arabic", codes: ["ar", "ar-AE", "ar-SA", "ar-QA", "ar-KW", "ar-SY", "ar-LB", "ar-PS", "ar-JO", "ar-EG", "ar-SD", "ar-TD", "ar-MA", "ar-DZ", "ar-TN", "ar-IQ", "ar-IR"] },
+  { name: "Armenian", codes: ["hy"] },
+  { name: "Assamese", codes: ["as", "as-IN"] },
+  { name: "Belarusian", codes: ["be"] },
+  { name: "Bengali", codes: ["bn"] },
+  { name: "Bosnian", codes: ["bs"] },
+  { name: "Bulgarian", codes: ["bg"] },
+  { name: "Catalan", codes: ["ca"] },
+  { name: "Chinese (Cantonese, Traditional)", codes: ["zh-HK"] },
+  { name: "Chinese (Mandarin, Simplified)", codes: ["zh", "zh-CN", "zh-Hans"] },
+  { name: "Chinese (Mandarin, Traditional)", codes: ["zh-TW", "zh-Hant"] },
+  { name: "Croatian", codes: ["hr"] },
+  { name: "Czech", codes: ["cs", "cs-CZ"] },
+  { name: "Danish", codes: ["da", "da-DK"] },
+  { name: "Dutch", codes: ["nl"] },
+  { name: "English", codes: ["en", "en-US", "en-AU", "en-GB", "en-IN", "en-NZ"] },
+  { name: "Estonian", codes: ["et"] },
+  { name: "Finnish", codes: ["fi"] },
+  { name: "Flemish", codes: ["nl-BE"] },
+  { name: "French", codes: ["fr", "fr-CA"] },
+  { name: "Georgian", codes: ["ka", "ka-GE"] },
+  { name: "German", codes: ["de"] },
+  { name: "German (Switzerland)", codes: ["de-CH"] },
+  { name: "Greek", codes: ["el"] },
+  { name: "Gujarati", codes: ["gu", "gu-IN"] },
+  { name: "Hebrew", codes: ["he"] },
+  { name: "Hindi", codes: ["hi"] },
+  { name: "Hungarian", codes: ["hu"] },
+  { name: "Indonesian", codes: ["id"] },
+  { name: "Italian", codes: ["it"] },
+  { name: "Japanese", codes: ["ja"] },
+  { name: "Kannada", codes: ["kn"] },
+  { name: "Kazakh", codes: ["kk", "kk-KZ"] },
+  { name: "Korean", codes: ["ko", "ko-KR"] },
+  { name: "Latvian", codes: ["lv"] },
+  { name: "Lithuanian", codes: ["lt"] },
+  { name: "Macedonian", codes: ["mk"] },
+  { name: "Malay", codes: ["ms"] },
+  { name: "Marathi", codes: ["mr"] },
+  { name: "Mongolian", codes: ["mn"] },
+  { name: "Nepali", codes: ["ne"] },
+  { name: "Norwegian", codes: ["no"] },
+  { name: "Pashto", codes: ["ps", "ps-AF"] },
+  { name: "Persian", codes: ["fa"] },
+  { name: "Polish", codes: ["pl"] },
+  { name: "Portuguese", codes: ["pt", "pt-BR", "pt-PT"] },
+  { name: "Punjabi", codes: ["pa", "pa-IN"] },
+  { name: "Romanian", codes: ["ro"] },
+  { name: "Russian", codes: ["ru"] },
+  { name: "Serbian", codes: ["sr"] },
+  { name: "Slovak", codes: ["sk"] },
+  { name: "Slovenian", codes: ["sl"] },
+  { name: "Spanish", codes: ["es", "es-419"] },
+  { name: "Swedish", codes: ["sv", "sv-SE"] },
+  { name: "Tagalog", codes: ["tl"] },
+  { name: "Tamil", codes: ["ta"] },
+  { name: "Telugu", codes: ["te"] },
+  { name: "Thai", codes: ["th", "th-TH"] },
+  { name: "Turkish", codes: ["tr", "tr-TR"] },
+  { name: "Ukrainian", codes: ["uk"] },
+  { name: "Urdu", codes: ["ur"] },
+  { name: "Vietnamese", codes: ["vi"] },
+];
+
+// Flattened { code, name } pairs used for lookup and autocomplete.
+const NOVA3_LANGUAGES: ReadonlyArray<{ code: string; name: string }> = NOVA3_LANGUAGE_GROUPS.flatMap(
+  ({ name, codes }) => codes.map((code) => ({ code, name })),
+);
+const LANG_BY_CODE = new Map(NOVA3_LANGUAGES.map(({ code, name }) => [code.toLowerCase(), name] as const));
+
+const DEFAULT_LANGUAGE = "en";
+
 // Deepgram streaming endpoint. Tuning notes:
 //   model=nova-3        — flagship, sub-300ms latency, best accuracy
+//   language=<code>     — only sent when not English (English is nova-3's default)
 //   encoding=linear16   — raw 16-bit PCM (what sox/rec gives us with -e signed-integer -b 16)
 //   sample_rate=16000   — 16kHz mono is the standard low-bandwidth STT format
 //   interim_results=false — we only want finals, never partials
 //   smart_format=true   — formats numbers, dates, currencies nicely
 //   punctuate=true      — adds commas/periods/question marks
 //   endpointing=300     — 300ms of silence ends an utterance (faster finals)
-const DG_URL =
+const deepgramUrl = (lang: string): string =>
   "wss://api.deepgram.com/v1/listen" +
   "?model=nova-3" +
+  (lang !== DEFAULT_LANGUAGE ? `&language=${encodeURIComponent(lang)}` : "") +
   "&encoding=linear16" +
   "&sample_rate=16000" +
   "&channels=1" +
@@ -130,6 +212,10 @@ function rmsToBlock(rms: number): string {
 
 export default function (pi: ExtensionAPI) {
   let state: State = "idle";
+  // Current transcription language (nova-3). English by default; switched
+  // via /dictate-language. Read fresh at each startDictation, so a recording
+  // in flight keeps the language it started with.
+  let language = DEFAULT_LANGUAGE;
   let rec: ChildProcessByStdio<null, Readable, Readable> | null = null;
   let ws: WebSocket | null = null;
   let finals: string[] = [];
@@ -185,7 +271,10 @@ export default function (pi: ExtensionAPI) {
     // ASCII, swap the glyph for "O".)
     const render = () => {
       const dot = activeCtx?.ui.theme.fg("error", "●") ?? "●";
-      setStatus(`${dot} ${meter.map(rmsToBlock).join("")} listening…`);
+      // Show the language code in the status row when it isn't the default,
+      // so it's visible at a glance what is being transcribed.
+      const langTag = language !== DEFAULT_LANGUAGE ? ` [${language}]` : "";
+      setStatus(`${dot} ${meter.map(rmsToBlock).join("")} listening${langTag}…`);
     };
     render();
     meterTimer = setInterval(() => {
@@ -364,7 +453,7 @@ export default function (pi: ExtensionAPI) {
     // Open Deepgram WebSocket. Auth via subprotocol (portable across Node native
     // WebSocket and browsers): `new WebSocket(url, ["token", API_KEY])`.
     try {
-      ws = new WebSocket(DG_URL, ["token", apiKey]);
+      ws = new WebSocket(deepgramUrl(language), ["token", apiKey]);
     } catch (e: any) {
       ctx.ui.notify(`Deepgram WS failed: ${e.message}`, "error");
       cleanup();
@@ -537,6 +626,50 @@ export default function (pi: ExtensionAPI) {
     description: "Cancel voice dictation (discard transcript)",
     handler: async () => {
       cancelDictation();
+    },
+  });
+
+  // /dictate-language — pick the transcription language for nova-3.
+  // Accepts a language code (en, sv, pt-BR, multi) or a language name
+  // ("Japanese"). Argument completion matches on both, so typing "ja" or
+  // "jap…" both suggest Japanese. No args shows the current language.
+  pi.registerCommand("dictate-language", {
+    description: "Set dictation language for nova-3 (e.g. ja, sv, pt-BR, multi)",
+    getArgumentCompletions: (prefix: string) => {
+      const p = prefix.trim().toLowerCase();
+      const matches = NOVA3_LANGUAGES.filter(
+        ({ code, name }) => code.toLowerCase().startsWith(p) || name.toLowerCase().startsWith(p),
+      );
+      if (matches.length === 0) return null;
+      return matches.map(({ code, name }) => ({ value: code, label: code, description: name }));
+    },
+    handler: async (args: string, ctx) => {
+      const arg = args.trim();
+      if (!arg) {
+        const name = LANG_BY_CODE.get(language.toLowerCase());
+        ctx.ui.notify(
+          `Dictation language: ${language}${name ? ` (${name})` : ""}. Usage: /dictate-language <code|name>`,
+          "info",
+        );
+        return;
+      }
+      const key = arg.toLowerCase();
+      const resolved =
+        NOVA3_LANGUAGES.find(({ code }) => code.toLowerCase() === key) ??
+        NOVA3_LANGUAGES.find(({ name }) => name.toLowerCase() === key);
+      if (!resolved) {
+        ctx.ui.notify(
+          `Unknown language "${arg}" — tab-complete /dictate-language for supported nova-3 codes`,
+          "error",
+        );
+        return;
+      }
+      language = resolved.code;
+      ctx.ui.notify(
+        `Dictation language: ${resolved.code} (${resolved.name})` +
+          (state !== "idle" ? " — takes effect on next dictation" : ""),
+        "info",
+      );
     },
   });
 
