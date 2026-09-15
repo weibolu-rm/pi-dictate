@@ -1,9 +1,10 @@
 /**
  * dictate — minimal voice dictation for pi.
  *
- * Press alt+m to start, press it again to stop.
- * Press alt+n to cancel and discard the in-flight transcript.
- * Run /dictate-language <code> to switch transcription language (default: en).
+ * Toggle dictation with alt+m (default; configurable via settings.json),
+ * press it again to stop. Cancel with alt+n (also configurable) to discard
+ * the in-flight transcript. Run /dictate-language <code> to switch the
+ * transcription language for the session (default: en).
  *
  * Focus-aware: alt+m/alt+n are intercepted at the TUI input layer (before any
  * focused component), so dictation works inside ANY dialog — quiz popups,
@@ -32,11 +33,12 @@
  * and the editor never shows revisable text.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, isKeyRelease, isKeyRepeat } from "@earendil-works/pi-tui";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { matchesKey, isKeyRelease, isKeyRepeat, type KeyId } from "@earendil-works/pi-tui";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 // Optional forensic logging: run pi with DICTATE_DEBUG=1 to append timestamped
 // lifecycle events (listener hits, toggles, ws open/error/close with their
@@ -128,6 +130,142 @@ const LANG_BY_CODE = new Map(NOVA3_LANGUAGES.map(({ code, name }) => [code.toLow
 
 const DEFAULT_LANGUAGE = "en";
 
+// ── Settings (settings.json) ─────────────────────────────────────────────────
+// Keybinds and the startup language are customizable from settings.json via a
+// namespaced "dictate" object (the same pattern other pi extensions use, e.g.
+// observational-memory). Project settings (.pi/settings.json) override global
+// ones (~/.pi/agent/settings.json):
+//
+//   {
+//     "dictate": {
+//       "toggleKey": "alt+m",
+//       "cancelKey": "alt+n",
+//       "language": "en"
+//     }
+//   }
+//
+// Key strings are pi-tui key identifiers: modifiers (ctrl/shift/alt/super,
+// any order, case-insensitive) joined with "+" before a base key — a letter,
+// digit, symbol, or special name (escape, enter, tab, f1…f12, up/down/…).
+// Unmodified printable keys are rejected (they would fire on every
+// keystroke); bare special keys like "f6" are fine. Invalid values fall
+// back to the defaults and a session-start notification explains what was
+// ignored. /dictate-language overrides the startup language for the current
+// session only.
+
+interface DictateConfig {
+  toggleKey: KeyId;
+  cancelKey: KeyId;
+  language: string;
+}
+
+const DEFAULT_CONFIG: DictateConfig = {
+  toggleKey: "alt+m",
+  cancelKey: "alt+n",
+  language: DEFAULT_LANGUAGE,
+};
+
+const KEY_MODIFIERS = new Set(["ctrl", "shift", "alt", "super"]);
+const SPECIAL_KEYS = new Set([
+  "escape", "esc", "enter", "return", "tab", "space", "backspace", "delete", "insert", "clear",
+  "home", "end", "pageup", "pagedown", "up", "down", "left", "right",
+  "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+]);
+// Keys that are safe to bind WITHOUT modifiers: they never type text.
+const SAFE_UNMODIFIED_KEYS = new Set([
+  "escape", "esc", "delete", "insert", "home", "end", "pageup", "pagedown",
+  "up", "down", "left", "right",
+  "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+]);
+// Printable symbol keys (pi-tui's SymbolKey set). Usable WITH modifiers —
+// bare ones are rejected by the unmodified-key rule below.
+const SYMBOL_KEYS = new Set("`-=[]\\;'\",./!@#$%^&*()_+|~{}:<>?".split(""));
+
+/**
+ * Validate a configured key string ("alt+m", "ctrl+shift+d", "f6", …) and
+ * return its canonical KeyId, or null if invalid. Mirrors how pi-tui's own
+ * matchesKey parses identifiers (lowercase, split on "+", order-free
+ * modifiers), so anything accepted here matches input correctly.
+ */
+function parseConfiguredKey(raw: string): KeyId | null {
+  const parts = raw
+    .trim()
+    .toLowerCase()
+    .split("+")
+    .map((p) => p.trim());
+  if (parts.length === 0 || parts.some((p) => !p)) return null;
+  const key = parts[parts.length - 1]!;
+  const mods = parts.slice(0, -1);
+  const isBaseKey = /^[a-z0-9]$/.test(key) || SYMBOL_KEYS.has(key) || SPECIAL_KEYS.has(key);
+  if (!isBaseKey) return null;
+  if (mods.some((m) => !KEY_MODIFIERS.has(m))) return null;
+  if (mods.length === 0 && !SAFE_UNMODIFIED_KEYS.has(key)) return null;
+  const uniqMods = [...new Set(mods)];
+  return (uniqMods.length > 0 ? `${uniqMods.join("+")}+${key}` : key) as KeyId;
+}
+
+/** Read the namespaced "dictate" object from a settings.json file, if present. */
+function readDictateSettings(path: string): Record<string, unknown> {
+  try {
+    if (!existsSync(path)) return {};
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown> | null;
+    const nested = parsed?.["dictate"];
+    return nested && typeof nested === "object" ? (nested as Record<string, unknown>) : {};
+  } catch {
+    return {}; // malformed settings file — pi itself reports that; we just use defaults
+  }
+}
+
+/** Validate one settings source's "dictate" object into config values + warnings. */
+function normalizeDictateSettings(raw: Record<string, unknown>): { values: Partial<DictateConfig>; warnings: string[] } {
+  const values: Partial<DictateConfig> = {};
+  const warnings: string[] = [];
+
+  for (const prop of ["toggleKey", "cancelKey"] as const) {
+    const value = raw[prop];
+    if (value === undefined) continue;
+    if (typeof value !== "string") {
+      warnings.push(`dictate.${prop}: expected a string — using fallback`);
+      continue;
+    }
+    const parsed = parseConfiguredKey(value);
+    if (!parsed) {
+      warnings.push(
+        `dictate.${prop}: "${value}" is not a usable key id (e.g. "alt+m", "ctrl+shift+d", "f6"; plain printable keys are rejected)`,
+      );
+      continue;
+    }
+    values[prop] = parsed;
+  }
+
+  if (raw.language !== undefined) {
+    if (typeof raw.language !== "string") {
+      warnings.push(`dictate.language: expected a string — using fallback`);
+    } else {
+      const wanted = raw.language.trim().toLowerCase();
+      const resolved = NOVA3_LANGUAGES.find(({ code }) => code.toLowerCase() === wanted);
+      if (!resolved) {
+        warnings.push(`dictate.language: "${raw.language}" is not a nova-3 language code`);
+      } else {
+        values.language = resolved.code;
+      }
+    }
+  }
+
+  return { values, warnings };
+}
+
+/** Load config: defaults ← global settings ← project settings (per key, so an
+ *  invalid project value falls back to the global one, not the default). */
+function loadConfig(cwd: string): { config: DictateConfig; warnings: string[] } {
+  const global = normalizeDictateSettings(readDictateSettings(join(getAgentDir(), "settings.json")));
+  const project = normalizeDictateSettings(readDictateSettings(join(cwd, ".pi", "settings.json")));
+  return {
+    config: { ...DEFAULT_CONFIG, ...global.values, ...project.values },
+    warnings: [...global.warnings, ...project.warnings],
+  };
+}
+
 // Deepgram streaming endpoint. Tuning notes:
 //   model=nova-3        — flagship, sub-300ms latency, best accuracy
 //   language=<code>     — only sent when not English (English is nova-3's default)
@@ -211,11 +349,17 @@ function rmsToBlock(rms: number): string {
 }
 
 export default function (pi: ExtensionAPI) {
+  // Keybinds + startup language from settings.json (see the Settings section
+  // above). Read once at load — registerShortcut needs the keys immediately.
+  const { config, warnings } = loadConfig(process.cwd());
+  let warningsShown = false;
+
   let state: State = "idle";
-  // Current transcription language (nova-3). English by default; switched
+  // Current transcription language (nova-3). Starts from the configured
+  // default ("en" unless overridden in settings.json); switched at runtime
   // via /dictate-language. Read fresh at each startDictation, so a recording
   // in flight keeps the language it started with.
-  let language = DEFAULT_LANGUAGE;
+  let language = config.language;
   let rec: ChildProcessByStdio<null, Readable, Readable> | null = null;
   let ws: WebSocket | null = null;
   let finals: string[] = [];
@@ -583,13 +727,13 @@ export default function (pi: ExtensionAPI) {
     // "Deepgram WebSocket error" (and its stale error event can kill the NEXT
     // session). Filter to press events only.
     if (isKeyRelease(data) || isKeyRepeat(data)) return undefined;
-    if (matchesKey(data, Key.alt("m"))) {
-      dbg(`alt+m (data=${JSON.stringify(data)}) state=${state}`);
+    if (matchesKey(data, config.toggleKey)) {
+      dbg(`toggle key (data=${JSON.stringify(data)}) state=${state}`);
       if (lastCtx) toggleDictation(lastCtx);
       return { consume: true };
     }
-    if (matchesKey(data, Key.alt("n"))) {
-      dbg(`alt+n (data=${JSON.stringify(data)}) state=${state}`);
+    if (matchesKey(data, config.cancelKey)) {
+      dbg(`cancel key (data=${JSON.stringify(data)}) state=${state}`);
       cancelDictation();
       return { consume: true };
     }
@@ -598,6 +742,11 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", (_event, ctx) => {
     lastCtx = ctx;
+    // Surface ignored settings values once per load (not per session).
+    if (warnings.length > 0 && !warningsShown) {
+      warningsShown = true;
+      ctx.ui.notify(`dictate: ${warnings.join("; ")}`, "warning");
+    }
     if (ctx.mode !== "tui" || tuiHandle) return;
     // Capture the TUI handle via an invisible zero-height widget. The
     // listener function reference is stable, so even if the factory re-runs
@@ -613,7 +762,7 @@ export default function (pi: ExtensionAPI) {
   // handle was never captured (non-TUI modes, older pi): they only fire when
   // the main editor is focused, but that's precisely the legacy path. When
   // the listener IS installed it consumes the key first, so no double-fire.
-  pi.registerShortcut(Key.alt("m"), {
+  pi.registerShortcut(config.toggleKey, {
     description: "Toggle voice dictation (Deepgram)",
     handler: async (ctx) => {
       toggleDictation(ctx);
@@ -622,7 +771,7 @@ export default function (pi: ExtensionAPI) {
 
   // Dedicated cancel binding. Dictation-only — a no-op when no dictation is
   // in flight, so it's safe to hammer without affecting anything else.
-  pi.registerShortcut(Key.alt("n"), {
+  pi.registerShortcut(config.cancelKey, {
     description: "Cancel voice dictation (discard transcript)",
     handler: async () => {
       cancelDictation();
@@ -648,7 +797,8 @@ export default function (pi: ExtensionAPI) {
       if (!arg) {
         const name = LANG_BY_CODE.get(language.toLowerCase());
         ctx.ui.notify(
-          `Dictation language: ${language}${name ? ` (${name})` : ""}. Usage: /dictate-language <code|name>`,
+          `Dictation language: ${language}${name ? ` (${name})` : ""}. Usage: /dictate-language <code|name>` +
+            ` — set "dictate.language" in settings.json to change the startup default`,
           "info",
         );
         return;

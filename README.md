@@ -2,8 +2,8 @@
 
 Minimal voice dictation for pi. No floating bubbles, no menu bar app, no notifications.
 
-- **Toggle:** `alt+m` (press to start, press again to stop) — works **anywhere in pi**, not just the main chat input: quiz popups, `ask_user_question`, `ctx.ui.editor()`/`input()` dialogs, selectors. The key is intercepted at the TUI input layer, before whatever component has focus.
-- **Cancel:** `alt+n` (discard the in-flight transcript; safe to press anytime, no-op when no dictation is in flight)
+- **Toggle:** `alt+m` by default (press to start, press again to stop) — works **anywhere in pi**, not just the main chat input: quiz popups, `ask_user_question`, `ctx.ui.editor()`/`input()` dialogs, selectors. The key is intercepted at the TUI input layer, before whatever component has focus. Customizable via the `dictate.toggleKey` setting.
+- **Cancel:** `alt+n` by default (discard the in-flight transcript; safe to press anytime, no-op when no dictation is in flight). Customizable via the `dictate.cancelKey` setting.
 - **Where text goes:** to whatever input field is focused **when you stop** (never replaces, always appends):
   - Main chat editor or any `ctx.ui.editor()`/`input()` popup → appended directly.
   - Opaque dialogs (quiz / ask_user_question selects) → typed in as keystrokes. Their internal focus is invisible to the extension, so **Tab into the note/Other field first** — that's where the text will land.
@@ -19,7 +19,7 @@ Minimal voice dictation for pi. No floating bubbles, no menu bar app, no notific
 ## Install
 
 ```bash
-pi install git:github.com/amosblomqvist/pi-dictate
+pi install git:github.com/weibolu-rm/pi-dictate
 ```
 
 Or manually: copy `index.ts` to `~/.pi/agent/extensions/dictate/index.ts`.
@@ -55,11 +55,29 @@ Run `/reload` in pi after first install (or after editing `index.ts`) to pick up
 
 ## Customizing
 
-All knobs are at the top of `index.ts`:
+### settings.json
 
-- **Hotkey:** change the `Key.alt("m")` / `Key.alt("n")` references near the bottom (the input listener `onGlobalInput` and the fallback `pi.registerShortcut` calls).
+Keybinds and the startup language live in settings.json — global (`~/.pi/agent/settings.json`) or per-project (`.pi/settings.json`, which overrides global) — under a `dictate` key:
+
+```json
+{
+  "dictate": {
+    "toggleKey": "alt+m",
+    "cancelKey": "alt+n",
+    "language": "en"
+  }
+}
+```
+
+- **Key strings** are pi-tui key identifiers: modifiers (`ctrl`, `shift`, `alt`, `super` — any order, case-insensitive) joined with `+` before a letter, digit, symbol, or special key name (`escape`, `enter`, `tab`, `f1`…`f12`, `up`/`down`/…). Unmodified printable keys (e.g. plain `m`) are rejected — they'd fire on every keystroke — but bare non-printing keys like `f6` work.
+- **`language`** is a nova-3 language code (`en` by default) — the same codes `/dictate-language` autocompletes. `/dictate-language` overrides it for the current session only; this setting sets the startup default.
+- Invalid values are ignored with a notification at session start, falling back per key: project → global → built-in default.
+
+### index.ts knobs
+
+For everything else, the knobs are at the top of `index.ts`:
+
 - **Model:** edit `deepgramUrl()` — swap `model=nova-3` for `nova-2`, `enhanced`, etc.
-- **Default language:** edit `DEFAULT_LANGUAGE` (or just run `/dictate-language` — the list of codes lives in `NOVA3_LANGUAGE_GROUPS`).
 - **Endpointing (how long a silence ends an utterance):** `endpointing=300` in the URL. Lower = faster finals, more fragmentation. Higher = slower finals, more coherent chunks.
 - **Smart formatting / punctuation:** toggle `smart_format` and `punctuate` in the URL.
 - **Level meter:** `METER_CELLS` (width in bars), `METER_TICK_MS` (update rate), `METER_FLOOR_DB` / `METER_CEILING_DB` (loudness range mapped to empty/full bars).
@@ -76,7 +94,7 @@ The defaults are `alt`-based rather than `ctrl+shift`-based because **`ctrl+shif
 
 On macOS, your terminal must treat Option as Alt/Meta (pi already requires this for its own `alt+enter` follow-up and `alt+up` dequeue bindings). Ghostty does this by default; in iTerm2 set Profile → Keys → Left/Right Option key → `Esc+`.
 
-If you prefer the original `ctrl+shift+m` / `ctrl+shift+n` bindings and run inside tmux, add this to `~/.tmux.conf` (tmux 3.5+) so tmux forwards modified keys in CSI-u form, then edit the `registerShortcut` calls at the bottom of `index.ts`:
+If you prefer the original `ctrl+shift+m` / `ctrl+shift+n` bindings and run inside tmux, add this to `~/.tmux.conf` (tmux 3.5+) so tmux forwards modified keys in CSI-u form, then set `dictate.toggleKey` / `dictate.cancelKey` in settings.json (see [Customizing](#customizing)):
 
 ```
 set -g extended-keys on
@@ -98,4 +116,4 @@ See https://pi.dev/docs/latest/tmux for the full pi-on-tmux keyboard guide.
 
 ## Notes
 
-This is  a fork of [amosblomqvist/pi-dictate](https://github.com/amosblomqvist/pi-dictate). I simply added language selection support for multilingual use. All credits to Amos, thank you for many free MIT pi tools!
+This is  a fork of [amosblomqvist/pi-dictate](https://github.com/amosblomqvist/pi-dictate). I simply added language selection support for multilingual use, as well as keybind customization. All credits to the original author; Thank you for the many free MIT pi tools!
